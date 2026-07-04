@@ -8,7 +8,7 @@ Built for #hackthekitty 2026.
 
 ## What It Does
 
-Felisk is a fully autonomous Trap-Neuter-Return (TNR) portal. Read [PITCH.md](github.com/psyberpath/felisk.git/PITCH.md) for more comprehensive detail.
+Felisk is a fully autonomous Trap-Neuter-Return (TNR) portal. Read [PITCH.md](https://github.com/psyberpath/felisk/blob/main/PITCH.md) for more comprehensive detail.
 
 When a cat approaches:
 
