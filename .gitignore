@@ -1,0 +1,27 @@
+# Virtual environment
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# YOLOv8 model weights (large binary, download separately)
+*.pt
+
+# IDE / editor
+.vscode/
+.kiro/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Pytest cache
+.pytest_cache/
+
+# Environment variables
+.env
+
+# Reference docs (not part of deliverable)
+knowledge/
