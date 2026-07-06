@@ -12,6 +12,7 @@ from temporalio.worker import Worker
 from temporal_engine.activities import (
     pico_lock_gate,
     pico_safe_release,
+    pico_set_mode,
     pico_unlock_gate,
 )
 from temporal_engine.workflows import TnrPortalWorkflow
@@ -28,7 +29,7 @@ async def main() -> None:
         client,
         task_queue=TASK_QUEUE,
         workflows=[TnrPortalWorkflow],
-        activities=[pico_unlock_gate, pico_lock_gate, pico_safe_release],
+        activities=[pico_unlock_gate, pico_lock_gate, pico_safe_release, pico_set_mode],
     )
 
     print(f"[WORKER] Felisk Temporal worker started on queue '{TASK_QUEUE}'")

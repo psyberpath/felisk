@@ -72,3 +72,14 @@ async def pico_safe_release(cmd: PicoCommand) -> str:
     """
     activity.logger.info(f"Safe release (Saga compensation): {cmd.description}")
     return _send_to_pico("SAFE_RELEASE")
+
+
+@activity.defn
+async def pico_set_mode(cmd: PicoCommand) -> str:
+    """
+    Switch Pico W gate resting state.
+    MODE_DOMESTIC → gate locks at 0°
+    MODE_TNR → gate opens to 90°
+    """
+    activity.logger.info(f"Setting mode: {cmd.command}")
+    return _send_to_pico(cmd.command)

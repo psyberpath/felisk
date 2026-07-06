@@ -4,11 +4,15 @@ Processes webcam frames via YOLOv8, classifies cats and prey,
 and signals the running Temporal workflow with classification results.
 Also sends direct socket commands to the Pico W for immediate actuation.
 
-Keyboard Overrides (for demo/presentation):
-  'i' — Simulate intact stray (un-neutered) detection → gate locks
-  't' — Simulate ear-tipped (neutered) detection → gate opens
-  'p' — Simulate prey in mouth detection → gate locks
-  'c' — Simulate clean cat (no prey) → gate opens
+Works with both modes:
+  DOMESTIC: Blocks prey-carrying cats from entering. Opens for clean residents.
+  TNR: Locks gate on intact strays for capture. Ear-tipped cats pass freely.
+
+Keyboard Overrides (for demo):
+  'i' — Simulate intact stray (un-neutered) detection
+  't' — Simulate ear-tipped (neutered) detection
+  'p' — Simulate prey in mouth detection
+  'c' — Simulate clean cat (no prey) detection
   'q' — Quit
 """
 
@@ -52,37 +56,33 @@ def _get_temporal_loop() -> asyncio.AbstractEventLoop:
 
 
 def signal_temporal_workflow(signal_name: str, payload) -> None:
-    """Send a signal to the running Temporal workflow (non-blocking)."""
+    """Send a signal to the running Temporal workflow. Blocks until sent."""
     loop = _get_temporal_loop()
 
     async def _signal():
         global _temporal_client
-        try:
-            from temporalio.client import Client
-            if _temporal_client is None:
-                _temporal_client = await Client.connect(TEMPORAL_ADDRESS)
-            handle = _temporal_client.get_workflow_handle(WORKFLOW_ID)
-            await handle.signal(signal_name, payload)
-            print(f"  [TEMPORAL] Signal sent: {signal_name} = {payload}")
-        except Exception as e:
-            print(f"  [TEMPORAL] Signal failed: {e}")
+        from temporalio.client import Client
+        if _temporal_client is None:
+            _temporal_client = await Client.connect(TEMPORAL_ADDRESS)
+        handle = _temporal_client.get_workflow_handle(WORKFLOW_ID)
+        await handle.signal(signal_name, payload)
+        print(f"  [TEMPORAL] Signal sent: {signal_name} = {payload}")
 
-    asyncio.run_coroutine_threadsafe(_signal(), loop)
+    future = asyncio.run_coroutine_threadsafe(_signal(), loop)
+    try:
+        future.result(timeout=5.0)  # Block until signal is confirmed sent
+    except Exception as e:
+        print(f"  [TEMPORAL] Signal failed: {e}")
 
 
-def simulate_detection(visual_status: str, pico_command: str) -> None:
+def simulate_detection(visual_status: str) -> None:
     """
-    Simulate a full detection cycle: presence → classification → actuation.
-    This is what keyboard overrides call to trigger a complete workflow encounter.
+    Simulate a full detection cycle: presence → classification.
+    Blocks until both signals are confirmed delivered to Temporal.
     """
-    # Step 1: Signal presence (wakes the workflow from MONITORING)
     signal_temporal_workflow("presence_event", True)
-    # Step 2: Small delay so the workflow registers presence and starts waiting for vision
-    time.sleep(0.3)
-    # Step 3: Send the vision classification
+    time.sleep(0.5)
     signal_temporal_workflow("prey_checked_event", visual_status)
-    # Step 4: Direct command to Pico W (immediate hardware feedback)
-    send_to_pico(pico_command)
 
 
 # ─── Socket Communication ────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ def send_to_pico(command: str) -> bool:
 
 
 def listen_for_pico_commands() -> None:
-    """Background thread: listen for TRIGGER_CAMERA / STOP_CAMERA from Pico."""
+    """Background thread: listen for commands from Pico (presence, RFID tags)."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", LISTEN_PORT))
@@ -128,8 +128,12 @@ def listen_for_pico_commands() -> None:
                 print("[CMD] Camera activated by Pico proximity trigger")
             elif data == "STOP_CAMERA":
                 camera_active.clear()
-                signal_temporal_workflow("presence_event", False)
                 print("[CMD] Camera paused — no motion")
+            elif data.startswith("RFID:"):
+                # Pico sends "RFID:<tag_uid>" when a tag is scanned
+                tag_uid = data[5:]
+                signal_temporal_workflow("tag_scanned_event", tag_uid)
+                print(f"[CMD] RFID tag forwarded to workflow: {tag_uid}")
         except socket.timeout:
             continue
         except OSError:
@@ -165,17 +169,17 @@ def handle_key(key: int) -> bool:
     if key == ord("q"):
         return True
     elif key == ord("i"):
-        print("\n[DEMO] Simulating: Intact stray detected → LOCK")
-        simulate_detection("intact_ear", "LOCK_CAPTURE")
+        print("\n[DEMO] Simulating: Intact stray detected")
+        simulate_detection("intact_ear")
     elif key == ord("t"):
-        print("\n[DEMO] Simulating: Ear-tipped cat detected → RELEASE")
-        simulate_detection("ear_tipped", "ACCESS_APPROVED")
+        print("\n[DEMO] Simulating: Ear-tipped cat detected")
+        simulate_detection("ear_tipped")
     elif key == ord("p"):
-        print("\n[DEMO] Simulating: Prey in mouth detected → LOCK")
-        simulate_detection("prey", "LOCK_CAPTURE")
+        print("\n[DEMO] Simulating: Prey in mouth detected")
+        simulate_detection("prey")
     elif key == ord("c"):
-        print("\n[DEMO] Simulating: Clean cat verified → RELEASE")
-        simulate_detection("clean", "ACCESS_APPROVED")
+        print("\n[DEMO] Simulating: Clean cat verified")
+        simulate_detection("clean")
     return False
 
 
@@ -194,22 +198,22 @@ def main() -> None:
         print("  macOS: grant camera access in System Settings → Privacy → Camera")
         print()
         print("  Demo keys:")
-        print("    i = intact stray (locks gate)")
-        print("    t = ear-tipped cat (opens gate)")
-        print("    p = prey detected (locks gate)")
-        print("    c = clean cat (opens gate)")
+        print("    i = intact stray        t = ear-tipped cat")
+        print("    p = prey detected       c = clean cat")
         print("    q = quit")
         print()
         # Fallback: keyboard-only mode (no camera needed for demo)
         # Need a tiny OpenCV window for key capture
         import numpy as np
-        blank = np.zeros((200, 400, 3), dtype=np.uint8)
-        cv2.putText(blank, "Felisk Vision — Demo Mode", (20, 60),
+        blank = np.zeros((200, 420, 3), dtype=np.uint8)
+        cv2.putText(blank, "Felisk Vision — Demo Mode", (20, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 130, 255), 2)
-        cv2.putText(blank, "i=stray  t=tipped  p=prey  c=clean", (20, 110),
+        cv2.putText(blank, "i=stray  t=tipped  p=prey  c=clean", (20, 100),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-        cv2.putText(blank, "q=quit", (20, 150),
+        cv2.putText(blank, "q=quit", (20, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        cv2.putText(blank, "Toggle mode on dashboard (localhost:5050)", (20, 180),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
 
         while True:
             cv2.imshow("Felisk Vision", blank)
@@ -253,12 +257,10 @@ def main() -> None:
                     print(f"[AI] Cat with PREY detected: {labels}")
                     time.sleep(0.2)
                     signal_temporal_workflow("prey_checked_event", "prey")
-                    send_to_pico("LOCK_CAPTURE")
                 else:
                     print(f"[AI] Clean cat verified: {labels}")
                     time.sleep(0.2)
                     signal_temporal_workflow("prey_checked_event", "clean")
-                    send_to_pico("ACCESS_APPROVED")
 
         # Draw YOLO annotations on display frame
         results = model(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)

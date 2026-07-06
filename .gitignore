@@ -11,7 +11,6 @@ __pycache__/
 
 # IDE / editor
 .vscode/
-.kiro/
 
 # OS files
 .DS_Store
@@ -25,3 +24,6 @@ Thumbs.db
 
 # Reference docs (not part of deliverable)
 knowledge/
+
+# Demo script (internal only)
+demoScript.md

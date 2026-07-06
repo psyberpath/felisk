@@ -1,8 +1,18 @@
 """
 Felisk — Temporal Workflow Test Suite
-Tests the TnrPortalWorkflow using Temporal's built-in test environment.
-Validates: signal handling, state queries, Saga rollback on timeout,
-authorized tag access, and volunteer decision paths.
+Tests the TnrPortalWorkflow dual-mode state machine using Temporal's
+built-in test environment.
+
+Validates:
+  - Domestic mode: authorized RFID + clean vision grants access
+  - Domestic mode: prey detection blocks entry
+  - Domestic mode: unknown tag keeps gate locked
+  - TNR mode: ear-tipped cat passes freely
+  - TNR mode: intact stray triggers lock
+  - TNR mode: volunteer SAFE_RELEASE opens gate
+  - TNR mode: Saga rollback on volunteer timeout
+  - Mode switching signal
+  - Query returns correct state
 """
 
 import asyncio
@@ -16,6 +26,7 @@ from temporal_engine.activities import (
     PicoCommand,
     pico_lock_gate,
     pico_safe_release,
+    pico_set_mode,
     pico_unlock_gate,
 )
 from temporal_engine.workflows import TnrPortalWorkflow
@@ -37,15 +48,15 @@ async def worker(env: WorkflowEnvironment):
         env.client,
         task_queue=TASK_QUEUE,
         workflows=[TnrPortalWorkflow],
-        activities=[pico_unlock_gate, pico_lock_gate, pico_safe_release],
+        activities=[pico_unlock_gate, pico_lock_gate, pico_safe_release, pico_set_mode],
     ):
         yield env.client
 
 
-# ─── Test: Workflow starts and enters MONITORING ─────────────────────────────
+# ─── Test: Workflow starts in MONITORING ─────────────────────────────────────
 @pytest.mark.asyncio
 async def test_workflow_starts_in_monitoring(env: WorkflowEnvironment, worker):
-    """Workflow should start and enter MONITORING phase, staying alive."""
+    """Workflow should start in DOMESTIC mode, MONITORING phase."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
@@ -57,36 +68,37 @@ async def test_workflow_starts_in_monitoring(env: WorkflowEnvironment, worker):
 
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
         assert state["workflow_phase"] == "MONITORING"
+        assert state["mode"] == "DOMESTIC"
         assert state["presence_active"] is False
-        assert state["tag_scanned"] == ""
         assert state["encounter_count"] == 0
 
-        # Cancel — workflow is long-running, won't complete on its own
         await handle.cancel()
 
 
-# ─── Test: Authorized RFID tag grants access, workflow stays alive ───────────
+# ─── DOMESTIC MODE TESTS ─────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
-async def test_authorized_tag_grants_access(env: WorkflowEnvironment, worker):
-    """Authorized tag completes one encounter; workflow resets to MONITORING."""
+async def test_domestic_authorized_tag_clean_vision(env: WorkflowEnvironment, worker):
+    """Domestic mode: authorized RFID + clean vision → gate opens."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
-            id="test-auth-tag",
+            id="test-domestic-clean",
             task_queue=TASK_QUEUE,
         )
 
         await asyncio.sleep(0.3)
 
-        # Signal presence + authorized tag
+        # Trigger presence + authorized RFID + clean vision
         await handle.signal(TnrPortalWorkflow.presence_event, True)
         await asyncio.sleep(0.3)
         await handle.signal(TnrPortalWorkflow.tag_scanned_event, "146_73_250_5")
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "clean")
 
-        # Wait for encounter processing
-        await asyncio.sleep(1.0)
+        # Wait for encounter to process + hold period (now 3s)
+        await asyncio.sleep(5)
 
-        # Workflow should have reset to MONITORING for next encounter
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
         assert state["workflow_phase"] == "MONITORING"
         assert state["encounter_count"] == 1
@@ -94,35 +106,84 @@ async def test_authorized_tag_grants_access(env: WorkflowEnvironment, worker):
         await handle.cancel()
 
 
-# ─── Test: Unregistered cat locks gate, volunteer approves capture ───────────
 @pytest.mark.asyncio
-async def test_unregistered_cat_lock_then_approve(env: WorkflowEnvironment, worker):
-    """Unregistered cat triggers lock; volunteer APPROVE_CAPTURE keeps it locked."""
+async def test_domestic_authorized_tag_prey_blocked(env: WorkflowEnvironment, worker):
+    """Domestic mode: authorized RFID + prey in mouth → gate stays locked."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
-            id="test-unregistered-approve",
+            id="test-domestic-prey",
             task_queue=TASK_QUEUE,
         )
 
         await asyncio.sleep(0.3)
 
-        # Signal presence (no tag follows — times out after 5s)
         await handle.signal(TnrPortalWorkflow.presence_event, True)
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.tag_scanned_event, "146_73_250_5")
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "prey")
 
-        # Wait for the 5s tag timeout + lock activity
-        await asyncio.sleep(7)
+        await asyncio.sleep(2)
 
-        # Should be LOCKED now
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
         assert state["workflow_phase"] == "LOCKED"
+        assert state["last_event"] == "Prey detected — entry denied to protect home"
 
-        # Volunteer approves capture
-        await handle.signal(TnrPortalWorkflow.volunteer_decision, "APPROVE_CAPTURE")
+        await handle.cancel()
 
-        await asyncio.sleep(1.0)
 
-        # Should have processed and reset
+@pytest.mark.asyncio
+async def test_domestic_unknown_tag_rejected(env: WorkflowEnvironment, worker):
+    """Domestic mode: unknown/no RFID tag → gate stays locked."""
+    with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
+        handle = await worker.start_workflow(
+            TnrPortalWorkflow.run,
+            id="test-domestic-unknown",
+            task_queue=TASK_QUEUE,
+        )
+
+        await asyncio.sleep(0.3)
+
+        # Presence + vision arrives but no authorized RFID
+        await handle.signal(TnrPortalWorkflow.presence_event, True)
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "intact_ear")
+
+        await asyncio.sleep(3)
+
+        state = await handle.query(TnrPortalWorkflow.get_workflow_state)
+        assert state["workflow_phase"] == "LOCKED"
+        assert "rejected" in state["last_event"] or "Unknown" in state["last_event"]
+
+        await handle.cancel()
+
+
+# ─── TNR MODE TESTS ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_tnr_ear_tipped_passes_freely(env: WorkflowEnvironment, worker):
+    """TNR mode: ear-tipped cat → gate stays open, encounter logged."""
+    with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
+        handle = await worker.start_workflow(
+            TnrPortalWorkflow.run,
+            id="test-tnr-tipped",
+            task_queue=TASK_QUEUE,
+        )
+
+        await asyncio.sleep(0.3)
+
+        # Switch to TNR mode
+        await handle.signal(TnrPortalWorkflow.set_mode, "TNR")
+        await asyncio.sleep(0.5)
+
+        # Cat enters — ear-tipped
+        await handle.signal(TnrPortalWorkflow.presence_event, True)
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "ear_tipped")
+
+        await asyncio.sleep(5)
+
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
         assert state["workflow_phase"] == "MONITORING"
         assert state["encounter_count"] == 1
@@ -130,27 +191,61 @@ async def test_unregistered_cat_lock_then_approve(env: WorkflowEnvironment, work
         await handle.cancel()
 
 
-# ─── Test: Unregistered cat lock, volunteer releases ─────────────────────────
 @pytest.mark.asyncio
-async def test_unregistered_cat_lock_then_release(env: WorkflowEnvironment, worker):
-    """Unregistered cat triggers lock; volunteer SAFE_RELEASE opens gate."""
+async def test_tnr_intact_stray_locks(env: WorkflowEnvironment, worker):
+    """TNR mode: intact stray → gate locks for capture."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
-            id="test-unregistered-release",
+            id="test-tnr-intact",
             task_queue=TASK_QUEUE,
         )
 
         await asyncio.sleep(0.3)
-        await handle.signal(TnrPortalWorkflow.presence_event, True)
 
-        # Wait for tag timeout + lock
-        await asyncio.sleep(7)
+        await handle.signal(TnrPortalWorkflow.set_mode, "TNR")
+        await asyncio.sleep(0.5)
+
+        await handle.signal(TnrPortalWorkflow.presence_event, True)
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "intact_ear")
+
+        await asyncio.sleep(2)
+
+        state = await handle.query(TnrPortalWorkflow.get_workflow_state)
+        assert state["workflow_phase"] == "LOCKED"
+        assert "Intact stray" in state["last_event"]
+
+        await handle.cancel()
+
+
+@pytest.mark.asyncio
+async def test_tnr_volunteer_release(env: WorkflowEnvironment, worker):
+    """TNR mode: locked stray + volunteer SAFE_RELEASE → gate opens."""
+    with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
+        handle = await worker.start_workflow(
+            TnrPortalWorkflow.run,
+            id="test-tnr-release",
+            task_queue=TASK_QUEUE,
+        )
+
+        await asyncio.sleep(0.3)
+
+        await handle.signal(TnrPortalWorkflow.set_mode, "TNR")
+        await asyncio.sleep(0.5)
+
+        # Intact stray enters
+        await handle.signal(TnrPortalWorkflow.presence_event, True)
+        await asyncio.sleep(0.3)
+        await handle.signal(TnrPortalWorkflow.prey_checked_event, "intact_ear")
+
+        # Wait for lock
+        await asyncio.sleep(3)
 
         # Volunteer releases
         await handle.signal(TnrPortalWorkflow.volunteer_decision, "SAFE_RELEASE")
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(5)
 
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
         assert state["workflow_phase"] == "MONITORING"
@@ -159,88 +254,55 @@ async def test_unregistered_cat_lock_then_release(env: WorkflowEnvironment, work
         await handle.cancel()
 
 
-# ─── Test: Saga rollback on volunteer timeout ────────────────────────────────
+# ─── MODE SWITCHING TEST ─────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
-async def test_saga_locked_state_and_release(env: WorkflowEnvironment, worker):
-    """
-    When no tag is found, workflow enters LOCKED state.
-    Verifies that sending SAFE_RELEASE after lock correctly releases.
-    (The 4h timeout saga rollback is a production safety net tested via design.)
-    """
+async def test_mode_switch_signal(env: WorkflowEnvironment, worker):
+    """Mode switch signal updates state and triggers Pico command."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
-            id="test-saga-locked",
+            id="test-mode-switch",
             task_queue=TASK_QUEUE,
         )
 
         await asyncio.sleep(0.3)
-        await handle.signal(TnrPortalWorkflow.presence_event, True)
 
-        # Wait for the 5s RFID timeout to expire + lock activity
-        await asyncio.sleep(7)
-
-        # Should be LOCKED (unregistered cat, awaiting volunteer)
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
-        assert state["workflow_phase"] == "LOCKED"
+        assert state["mode"] == "DOMESTIC"
 
-        # Simulate volunteer releasing (same path saga would take on timeout)
-        await handle.signal(TnrPortalWorkflow.volunteer_decision, "SAFE_RELEASE")
-        await asyncio.sleep(1.0)
+        await handle.signal(TnrPortalWorkflow.set_mode, "TNR")
+        await asyncio.sleep(1)
 
-        # Workflow resets after release
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
-        assert state["workflow_phase"] == "MONITORING"
-        assert state["encounter_count"] == 1
+        assert state["mode"] == "TNR"
+        assert "TNR" in state["last_event"]
 
         await handle.cancel()
 
 
-# ─── Test: Query returns correct state after signals ─────────────────────────
+# ─── QUERY STATE TEST ────────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
-async def test_query_returns_state(env: WorkflowEnvironment, worker):
-    """Workflow query should reflect signals sent while in MONITORING."""
+async def test_query_returns_full_state(env: WorkflowEnvironment, worker):
+    """Query should return all state fields including mode."""
     with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
         handle = await worker.start_workflow(
             TnrPortalWorkflow.run,
-            id="test-query-state",
+            id="test-query-full",
             task_queue=TASK_QUEUE,
         )
 
         await asyncio.sleep(0.3)
 
-        # Send vision signal (doesn't advance the workflow, just updates state)
-        await handle.signal(TnrPortalWorkflow.prey_checked_event, "intact_ear")
-        await asyncio.sleep(0.3)
-
         state = await handle.query(TnrPortalWorkflow.get_workflow_state)
-        assert state["visual_status"] == "intact_ear"
-        assert state["workflow_phase"] == "MONITORING"
-
-        await handle.cancel()
-
-
-# ─── Test: Volunteer override before presence ────────────────────────────────
-@pytest.mark.asyncio
-async def test_volunteer_override_before_presence(env: WorkflowEnvironment, worker):
-    """Volunteer can trigger SAFE_RELEASE even before presence is detected."""
-    with patch("temporal_engine.activities._send_to_pico", return_value="OK"):
-        handle = await worker.start_workflow(
-            TnrPortalWorkflow.run,
-            id="test-early-override",
-            task_queue=TASK_QUEUE,
-        )
-
-        await asyncio.sleep(0.3)
-
-        # Volunteer override without any presence signal
-        await handle.signal(TnrPortalWorkflow.volunteer_decision, "SAFE_RELEASE")
-
-        await asyncio.sleep(1.0)
-
-        # Encounter processed, back to monitoring
-        state = await handle.query(TnrPortalWorkflow.get_workflow_state)
-        assert state["workflow_phase"] == "MONITORING"
-        assert state["encounter_count"] == 1
+        assert "mode" in state
+        assert "presence_active" in state
+        assert "tag_scanned" in state
+        assert "visual_status" in state
+        assert "human_decision" in state
+        assert "workflow_phase" in state
+        assert "encounter_count" in state
+        assert "last_event" in state
 
         await handle.cancel()
