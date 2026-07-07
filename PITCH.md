@@ -6,7 +6,7 @@
 
 ## One-Line Pitch
 
-**"Felisk is a self-healing, durable agentic AI portal for community feline care — an under-$50 open-source IoT kit that autonomously identifies, classifies, and manages cats using edge AI and fault-tolerant workflow orchestration, guaranteeing no animal is ever left trapped."**
+**"Felisk is a self-healing, durable agentic AI portal for community feline care — an open-source IoT kit that autonomously identifies, classifies, and manages cats using edge AI and fault-tolerant workflow orchestration, guaranteeing no animal is ever left trapped."**
 
 ---
 
@@ -126,3 +126,10 @@ The code is already open-source. The vision is community volunteer networks worl
 ## Closing Line
 
 > "Every year, millions of feral cats and billions of birds die because we don't have affordable, intelligent infrastructure for humane management. Felisk is that infrastructure — a self-healing edge agent that costs less than a vet visit and guarantees no animal is ever left behind."
+
+
+## Demo Video
+
+Watch the full demo here: https://drive.google.com/drive/folders/1YmOivOhYAosYQEg68PwJZZc2VgkJdpQ4
+
+A captions `.txt` file is included in the folder — kindly use it to follow along with the video narration.

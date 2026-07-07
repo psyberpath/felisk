@@ -146,3 +146,11 @@ The dashboard updates in real time throughout, showing exactly which stage of th
 ## License
 
 MIT
+
+---
+
+## Demo Video
+
+Watch the full demo: https://drive.google.com/drive/folders/1YmOivOhYAosYQEg68PwJZZc2VgkJdpQ4
+
+A captions `.txt` file is included in the folder — kindly use it to follow along with the video narration.
